@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { passesHardFilters, rankEvent } from "../lib/search-engine.ts";
+import {
+  expandQuery,
+  passesHardFilters,
+  rankEvent,
+  searchVariants,
+} from "../lib/search-engine.ts";
 
 const base = {
   id: "evt-test",
@@ -83,4 +88,48 @@ test("applies date, time, format, and availability as hard filters", () => {
   );
   assert.equal(passesHardFilters(event, { time: "morning" }), false);
   assert.equal(passesHardFilters(event, { format: "hackathon" }), false);
+});
+
+test("does not treat generic founder language as venture capital evidence", () => {
+  const result = rankEvent(
+    {
+      ...base,
+      title: "AI Philosophy Nights: Indifferent Intelligence",
+      description:
+        "A salon for philosophers, technologists, startup founders, and social scientists.",
+    },
+    "VC",
+  );
+
+  assert.equal(result, null);
+});
+
+test("expands VC and accepts genuine investor events", () => {
+  const result = rankEvent(
+    {
+      ...base,
+      title: "Founder and Investor Summit",
+      description:
+        "A curated gathering for venture investors, seed investors, and portfolio founders.",
+    },
+    "VC",
+  );
+
+  assert.ok(result);
+  assert.match(result.reasons[0], /venture capital/);
+  assert.deepEqual(searchVariants("VC"), ["VC", "venture capital", "investor"]);
+});
+
+test("expands other common event-search acronyms", () => {
+  assert.equal(expandQuery("ML in healthcare"), "machine learning in healthcare");
+  assert.ok(
+    rankEvent(
+      {
+        ...base,
+        title: "Machine Learning for Clinical Care",
+        description: "Applied models for physicians and patient outcomes.",
+      },
+      "ML in healthcare",
+    ),
+  );
 });

@@ -44,3 +44,7 @@ next-env.d.ts
 # local preview and scraper inspection files
 /.openai/*.log
 /.openai/luma-*.html
+/.openai/luma-*.js
+/.openai/luma-current-chunks/
+/.openai/luma-*.json
+/.openai/local-*.json

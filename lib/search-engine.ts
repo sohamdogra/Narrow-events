@@ -27,6 +27,17 @@ export type RankedEvent = SearchEvent & {
 
 type Concept = { label: string; terms: string[] };
 
+const QUERY_ALIASES: Record<string, string> = {
+  vc: "venture capital",
+  vcs: "venture capital",
+  ml: "machine learning",
+  pm: "product management",
+  gtm: "go to market",
+  saas: "software as a service",
+  ar: "augmented reality",
+  vr: "virtual reality",
+};
+
 const CONCEPTS: Concept[] = [
   {
     label: "AI",
@@ -108,14 +119,34 @@ const CONCEPTS: Concept[] = [
     ],
   },
   {
+    label: "venture capital",
+    terms: [
+      "venture capital",
+      "venture capitalist",
+      "venture capitalists",
+      "venture fund",
+      "venture funds",
+      "venture investor",
+      "venture investors",
+      "seed investor",
+      "seed investors",
+      "angel investor",
+      "angel investors",
+      "investor",
+      "investors",
+      "general partner",
+      "limited partner",
+      "dealflow",
+      "deal flow",
+    ],
+  },
+  {
     label: "startups",
     terms: [
       "startup",
       "startups",
       "founder",
       "founders",
-      "venture capital",
-      "vc",
       "entrepreneur",
       "pitch",
       "accelerator",
@@ -229,6 +260,23 @@ export function normalize(value: string) {
     .trim();
 }
 
+export function expandQuery(query: string) {
+  return normalize(query)
+    .split(" ")
+    .map((token) => QUERY_ALIASES[token] ?? token)
+    .join(" ");
+}
+
+export function searchVariants(query: string) {
+  const original = query.trim();
+  const normalized = normalize(original);
+  const expanded = expandQuery(original);
+  const variants = [original];
+  if (expanded && expanded !== normalized) variants.push(expanded);
+  if (normalized === "vc" || normalized === "vcs") variants.push("investor");
+  return [...new Set(variants)].slice(0, 3);
+}
+
 function includesTerm(text: string, term: string) {
   const haystack = ` ${text} `;
   const needle = ` ${normalize(term)} `;
@@ -236,7 +284,7 @@ function includesTerm(text: string, term: string) {
 }
 
 function queryConcepts(query: string) {
-  const normalized = normalize(query);
+  const normalized = expandQuery(query);
   return CONCEPTS.filter((concept) =>
     concept.terms.some((term) => includesTerm(normalized, term)),
   );
@@ -369,6 +417,7 @@ export function passesHardFilters(
 }
 
 export function preScore(event: SearchEvent, query: string) {
+  const semanticQuery = expandQuery(query);
   const title = normalize(event.title);
   const supporting = normalize(`${event.organizer} ${event.formatText}`);
   const concepts = queryConcepts(query);
@@ -380,14 +429,15 @@ export function preScore(event: SearchEvent, query: string) {
     ["biotech", "biology", "bioeconomy", "genomic", "genomics", "life science"]
       .some((term) => includesTerm(`${title} ${supporting}`, term));
   return Math.min(100,
-    tokenCoverage(query, `${title} ${supporting}`, concepts) * 60 +
+    tokenCoverage(semanticQuery, `${title} ${supporting}`, concepts) * 60 +
     (concepts.length ? (conceptHits / concepts.length) * 40 : 0) +
     (healthcareAdjacent ? 24 : 0)
   );
 }
 
 export function rankEvent(event: SearchEvent, query: string): RankedEvent | null {
-  const cleanQuery = normalize(query);
+  const originalQuery = normalize(query);
+  const cleanQuery = expandQuery(query);
   if (!cleanQuery) return null;
 
   const title = normalize(event.title);
@@ -411,15 +461,18 @@ export function rankEvent(event: SearchEvent, query: string): RankedEvent | null
   const minimumConcept = conceptResults.length
     ? Math.min(...conceptResults.map((result) => result.confidence))
     : 1;
-  const lexical = tokenCoverage(query, fullText, concepts);
+  const lexical = tokenCoverage(cleanQuery, fullText, concepts);
   const titleRelevance = Math.max(
-    tokenCoverage(query, title, concepts),
+    tokenCoverage(cleanQuery, title, concepts),
     conceptResults.length
       ? conceptResults.filter((result) => result.confidence === 1).length /
           conceptResults.length
       : 0,
   );
-  const phrase = fullText.includes(cleanQuery) ? 1 : 0;
+  const phrase =
+    includesTerm(fullText, cleanQuery) || includesTerm(fullText, originalQuery)
+      ? 1
+      : 0;
 
   let score = concepts.length
     ? conceptScore * 46 + lexical * 26 + titleRelevance * 18 + phrase * 10

@@ -3,6 +3,7 @@ import {
   passesHardFilters,
   preScore,
   rankEvent,
+  searchVariants,
   type SearchEvent,
   type TimeWindow,
 } from "../../../lib/search-engine";
@@ -11,6 +12,7 @@ export const runtime = "edge";
 
 const DETAIL_CACHE = new Map<string, { expiresAt: number; data: any }>();
 const PAGE_CACHE = new Map<string, { expiresAt: number; html: string }>();
+const JSON_CACHE = new Map<string, { expiresAt: number; data: any }>();
 
 const CITY_SLUGS: Record<string, string> = {
   "san francisco": "sf",
@@ -136,6 +138,7 @@ async function fetchPublicPage(url: string) {
       Accept: "text/html,application/xhtml+xml",
       "User-Agent": "Mozilla/5.0 (compatible; NarrowEventSearch/1.0)",
     },
+    signal: AbortSignal.timeout(10_000),
     cf: { cacheTtl: 900, cacheEverything: true },
   } as RequestInit);
   if (!response.ok) {
@@ -152,6 +155,59 @@ async function fetchPublicPage(url: string) {
   }
   PAGE_CACHE.set(url, { html, expiresAt: Date.now() + 15 * 60 * 1000 });
   return html;
+}
+
+async function fetchPublicJson(url: string) {
+  const cached = JSON_CACHE.get(url);
+  if (cached && cached.expiresAt > Date.now()) return cached.data;
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "Mozilla/5.0 (compatible; NarrowEventSearch/1.0)",
+    },
+    signal: AbortSignal.timeout(10_000),
+    cf: { cacheTtl: 900, cacheEverything: true },
+  } as RequestInit);
+  if (!response.ok) {
+    if (cached) return cached.data;
+    throw new Error(`Luma search returned ${response.status}.`);
+  }
+  const data = await response.json();
+  if (JSON_CACHE.size >= 100) {
+    const oldestKey = JSON_CACHE.keys().next().value;
+    if (oldestKey) JSON_CACHE.delete(oldestKey);
+  }
+  JSON_CACHE.set(url, { data, expiresAt: Date.now() + 15 * 60 * 1000 });
+  return data;
+}
+
+async function searchDiscovery(placeApiId: string, query: string) {
+  const batches = await Promise.all(
+    searchVariants(query).map(async (variant) => {
+      try {
+        const url = new URL("https://api.luma.com/discover/get-paginated-events");
+        url.searchParams.set("discover_place_api_id", placeApiId);
+        url.searchParams.set("query", variant);
+        const data = await fetchPublicJson(url.toString());
+        return Array.isArray(data?.entries) ? data.entries : [];
+      } catch {
+        // The public search endpoint is additive; featured city events remain a fallback.
+        return [];
+      }
+    }),
+  );
+  return batches.flat();
+}
+
+function uniqueEvents(events: SearchEvent[]) {
+  const seen = new Set<string>();
+  return events.filter((event) => {
+    const key = event.id || event.url;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 async function enrich(events: SearchEvent[]) {
@@ -208,9 +264,15 @@ export async function GET(request: NextRequest) {
       throw new Error(`Luma does not have a discoverable city page for “${city}”.`);
     }
 
-    const baseEvents = rawEvents
-      .map(fromDiscovery)
-      .filter((event: SearchEvent) => event.startAt && event.url);
+    const place = data?.props?.pageProps?.initialData?.data?.place;
+    const searchedEvents = place?.api_id
+      ? await searchDiscovery(place.api_id, query)
+      : [];
+    const baseEvents = uniqueEvents(
+      [...searchedEvents, ...rawEvents]
+        .map(fromDiscovery)
+        .filter((event: SearchEvent) => event.startAt && event.url),
+    );
     const filters = {
       from: params.get("from") ?? undefined,
       to: params.get("to") ?? undefined,
@@ -225,7 +287,7 @@ export async function GET(request: NextRequest) {
     const candidates = filtered
       .map((event: SearchEvent) => ({ event, score: preScore(event, query) }))
       .sort((a: { score: number }, b: { score: number }) => b.score - a.score)
-      .slice(0, 12)
+      .slice(0, 18)
       .map((candidate: { event: SearchEvent }) => candidate.event);
     const detailed = await enrich(candidates);
     const results = detailed
@@ -239,7 +301,7 @@ export async function GET(request: NextRequest) {
       {
         results,
         meta: {
-          city: data?.props?.pageProps?.initialData?.data?.place?.name ?? city,
+          city: place?.name ?? city,
           scanned: baseEvents.length,
           afterFilters: filtered.length,
           analyzed: detailed.length,
